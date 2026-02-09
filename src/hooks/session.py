@@ -3,7 +3,7 @@ from livekit.agents import AgentSession, room_io
 from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-from src.agents.protfolio_agent import PortfolioAssistant
+from src.agents.protfolio_agent import BookingUserData, PortfolioAssistant
 
 
 async def portfolio_agent_handler(ctx: agents.JobContext):
@@ -13,6 +13,7 @@ async def portfolio_agent_handler(ctx: agents.JobContext):
         tts="cartesia/sonic-3:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
+        userdata=BookingUserData(),
     )
 
     await session.start(
@@ -26,5 +27,5 @@ async def portfolio_agent_handler(ctx: agents.JobContext):
     )
 
     await session.generate_reply(
-        instructions="Greet the user and offer your assistance."
+        instructions="Greet the user introudcing yourself and offer your assistance."
     )
