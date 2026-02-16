@@ -29,4 +29,13 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str | None = get_env("OPENAI_API_KEY")
     CARTESIA_API_KEY: str | None = get_env("CARTESIA_API_KEY")
 
+    # Database (Postgres); e.g. postgresql+psycopg://user:pass@localhost:5432/voice_portfolio
+    DATABASE_URL: str | None = get_env("DATABASE_URL")
+
+    # R2 / S3-compatible object storage (e.g. Cloudflare R2)
+    R2_ENDPOINT: str | None = get_env("R2_ENDPOINT")
+    R2_BUCKET: str | None = get_env("R2_BUCKET")
+    R2_ACCESS_KEY_ID: str | None = get_env("R2_ACCESS_KEY_ID")
+    R2_SECRET_ACCESS_KEY: str | None = get_env("R2_SECRET_ACCESS_KEY")
+
 settings = Settings()
