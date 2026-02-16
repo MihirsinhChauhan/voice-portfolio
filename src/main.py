@@ -3,6 +3,7 @@ import argparse
 from dotenv import load_dotenv
 from livekit.agents import AgentServer, cli
 from src.hooks.session import portfolio_agent_handler
+from src.hooks.session_capture import on_session_end
 from src.utils.logging import logger
 
 if os.path.exists(".env.local"):
@@ -10,7 +11,7 @@ if os.path.exists(".env.local"):
 
 def setup_server():
     server = AgentServer()
-    server.rtc_session()(portfolio_agent_handler)
+    server.rtc_session(on_session_end=on_session_end)(portfolio_agent_handler)
     return server
 
 if __name__ == "__main__":
