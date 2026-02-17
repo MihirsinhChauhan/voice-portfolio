@@ -3,6 +3,7 @@
 
 CREATE TABLE users (
     id VARCHAR(32) PRIMARY KEY,
+    visitor_id VARCHAR(32),
     email VARCHAR(255),
     name VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -12,6 +13,17 @@ CREATE TABLE users (
 );
 
 CREATE UNIQUE INDEX ix_users_email ON users (email);
+CREATE UNIQUE INDEX ix_users_visitor_id ON users (visitor_id);
+
+CREATE TABLE user_profiles (
+    user_id VARCHAR(32) PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+    company VARCHAR(255),
+    domain VARCHAR(255),
+    last_intent_type VARCHAR(32),
+    booked_before BOOLEAN NOT NULL DEFAULT false,
+    last_visit_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE sessions (
     id VARCHAR(32) PRIMARY KEY,

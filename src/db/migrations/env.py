@@ -29,9 +29,9 @@ def get_url() -> str:
     import os
     url = os.environ.get("DATABASE_URL")
     if url:
-        # Alembic expects postgresql://; we may have postgresql+psycopg://
-        if url.startswith("postgresql+psycopg"):
-            url = url.replace("postgresql+psycopg", "postgresql", 1)
+        # Some providers use postgres://; SQLAlchemy expects postgresql://
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
         return url
     return config.get_main_option("sqlalchemy.url", "postgresql://localhost/voice_portfolio")
 
@@ -39,8 +39,8 @@ def get_url() -> str:
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode (generate SQL only)."""
     url = get_url()
-    if url.startswith("postgresql+psycopg"):
-        url = url.replace("postgresql+psycopg", "postgresql", 1)
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
     context.configure(
         url=url,
         target_metadata=target_metadata,

@@ -11,14 +11,20 @@ from src.db.sqlc import models
 
 
 GET_USER_BY_EMAIL = """-- name: get_user_by_email \\:one
-SELECT id, email, name, created_at, last_seen_at, total_sessions, total_bookings FROM users
+SELECT id, visitor_id, email, name, created_at, last_seen_at, total_sessions, total_bookings FROM users
 WHERE email = :p1
 """
 
 
 GET_USER_BY_ID = """-- name: get_user_by_id \\:one
-SELECT id, email, name, created_at, last_seen_at, total_sessions, total_bookings FROM users
+SELECT id, visitor_id, email, name, created_at, last_seen_at, total_sessions, total_bookings FROM users
 WHERE id = :p1
+"""
+
+
+GET_USER_BY_VISITOR_ID = """-- name: get_user_by_visitor_id \\:one
+SELECT id, visitor_id, email, name, created_at, last_seen_at, total_sessions, total_bookings FROM users
+WHERE visitor_id = :p1
 """
 
 
@@ -44,7 +50,19 @@ ON CONFLICT (email)
 DO UPDATE SET
   name = COALESCE(EXCLUDED.name, users.name),
   last_seen_at = now()
-RETURNING id, email, name, created_at, last_seen_at, total_sessions, total_bookings
+RETURNING id, visitor_id, email, name, created_at, last_seen_at, total_sessions, total_bookings
+"""
+
+
+UPSERT_USER_BY_VISITOR_ID = """-- name: upsert_user_by_visitor_id \\:one
+INSERT INTO users (id, visitor_id, email, name, created_at, last_seen_at, total_sessions, total_bookings)
+VALUES (:p1, :p2, :p3, :p4, now(), now(), 0, 0)
+ON CONFLICT (visitor_id)
+DO UPDATE SET
+  email = COALESCE(EXCLUDED.email, users.email),
+  name = COALESCE(EXCLUDED.name, users.name),
+  last_seen_at = now()
+RETURNING id, visitor_id, email, name, created_at, last_seen_at, total_sessions, total_bookings
 """
 
 
@@ -58,12 +76,13 @@ class Querier:
             return None
         return models.User(
             id=row[0],
-            email=row[1],
-            name=row[2],
-            created_at=row[3],
-            last_seen_at=row[4],
-            total_sessions=row[5],
-            total_bookings=row[6],
+            visitor_id=row[1],
+            email=row[2],
+            name=row[3],
+            created_at=row[4],
+            last_seen_at=row[5],
+            total_sessions=row[6],
+            total_bookings=row[7],
         )
 
     def get_user_by_id(self, *, id: str) -> Optional[models.User]:
@@ -72,12 +91,28 @@ class Querier:
             return None
         return models.User(
             id=row[0],
-            email=row[1],
-            name=row[2],
-            created_at=row[3],
-            last_seen_at=row[4],
-            total_sessions=row[5],
-            total_bookings=row[6],
+            visitor_id=row[1],
+            email=row[2],
+            name=row[3],
+            created_at=row[4],
+            last_seen_at=row[5],
+            total_sessions=row[6],
+            total_bookings=row[7],
+        )
+
+    def get_user_by_visitor_id(self, *, visitor_id: Optional[str]) -> Optional[models.User]:
+        row = self._conn.execute(sqlalchemy.text(GET_USER_BY_VISITOR_ID), {"p1": visitor_id}).first()
+        if row is None:
+            return None
+        return models.User(
+            id=row[0],
+            visitor_id=row[1],
+            email=row[2],
+            name=row[3],
+            created_at=row[4],
+            last_seen_at=row[5],
+            total_sessions=row[6],
+            total_bookings=row[7],
         )
 
     def increment_user_booking_count(self, *, id: str) -> None:
@@ -92,12 +127,33 @@ class Querier:
             return None
         return models.User(
             id=row[0],
-            email=row[1],
-            name=row[2],
-            created_at=row[3],
-            last_seen_at=row[4],
-            total_sessions=row[5],
-            total_bookings=row[6],
+            visitor_id=row[1],
+            email=row[2],
+            name=row[3],
+            created_at=row[4],
+            last_seen_at=row[5],
+            total_sessions=row[6],
+            total_bookings=row[7],
+        )
+
+    def upsert_user_by_visitor_id(self, *, id: str, visitor_id: Optional[str], email: Optional[str], name: Optional[str]) -> Optional[models.User]:
+        row = self._conn.execute(sqlalchemy.text(UPSERT_USER_BY_VISITOR_ID), {
+            "p1": id,
+            "p2": visitor_id,
+            "p3": email,
+            "p4": name,
+        }).first()
+        if row is None:
+            return None
+        return models.User(
+            id=row[0],
+            visitor_id=row[1],
+            email=row[2],
+            name=row[3],
+            created_at=row[4],
+            last_seen_at=row[5],
+            total_sessions=row[6],
+            total_bookings=row[7],
         )
 
 
@@ -111,12 +167,13 @@ class AsyncQuerier:
             return None
         return models.User(
             id=row[0],
-            email=row[1],
-            name=row[2],
-            created_at=row[3],
-            last_seen_at=row[4],
-            total_sessions=row[5],
-            total_bookings=row[6],
+            visitor_id=row[1],
+            email=row[2],
+            name=row[3],
+            created_at=row[4],
+            last_seen_at=row[5],
+            total_sessions=row[6],
+            total_bookings=row[7],
         )
 
     async def get_user_by_id(self, *, id: str) -> Optional[models.User]:
@@ -125,12 +182,28 @@ class AsyncQuerier:
             return None
         return models.User(
             id=row[0],
-            email=row[1],
-            name=row[2],
-            created_at=row[3],
-            last_seen_at=row[4],
-            total_sessions=row[5],
-            total_bookings=row[6],
+            visitor_id=row[1],
+            email=row[2],
+            name=row[3],
+            created_at=row[4],
+            last_seen_at=row[5],
+            total_sessions=row[6],
+            total_bookings=row[7],
+        )
+
+    async def get_user_by_visitor_id(self, *, visitor_id: Optional[str]) -> Optional[models.User]:
+        row = (await self._conn.execute(sqlalchemy.text(GET_USER_BY_VISITOR_ID), {"p1": visitor_id})).first()
+        if row is None:
+            return None
+        return models.User(
+            id=row[0],
+            visitor_id=row[1],
+            email=row[2],
+            name=row[3],
+            created_at=row[4],
+            last_seen_at=row[5],
+            total_sessions=row[6],
+            total_bookings=row[7],
         )
 
     async def increment_user_booking_count(self, *, id: str) -> None:
@@ -145,10 +218,31 @@ class AsyncQuerier:
             return None
         return models.User(
             id=row[0],
-            email=row[1],
-            name=row[2],
-            created_at=row[3],
-            last_seen_at=row[4],
-            total_sessions=row[5],
-            total_bookings=row[6],
+            visitor_id=row[1],
+            email=row[2],
+            name=row[3],
+            created_at=row[4],
+            last_seen_at=row[5],
+            total_sessions=row[6],
+            total_bookings=row[7],
+        )
+
+    async def upsert_user_by_visitor_id(self, *, id: str, visitor_id: Optional[str], email: Optional[str], name: Optional[str]) -> Optional[models.User]:
+        row = (await self._conn.execute(sqlalchemy.text(UPSERT_USER_BY_VISITOR_ID), {
+            "p1": id,
+            "p2": visitor_id,
+            "p3": email,
+            "p4": name,
+        })).first()
+        if row is None:
+            return None
+        return models.User(
+            id=row[0],
+            visitor_id=row[1],
+            email=row[2],
+            name=row[3],
+            created_at=row[4],
+            last_seen_at=row[5],
+            total_sessions=row[6],
+            total_bookings=row[7],
         )

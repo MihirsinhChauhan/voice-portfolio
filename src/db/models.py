@@ -34,6 +34,9 @@ class User(Base):
     id: Mapped[str] = mapped_column(
         String(32), primary_key=True, default=uuid7_hex
     )
+    visitor_id: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, unique=True, index=True
+    )
     email: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -47,6 +50,29 @@ class User(Base):
 
     sessions: Mapped[list["Session"]] = relationship(back_populates="user")
     bookings: Mapped[list["Booking"]] = relationship(back_populates="user")
+    profile: Mapped["UserProfile | None"] = relationship(
+        back_populates="user", uselist=False
+    )
+
+
+class UserProfile(Base):
+    __tablename__ = "user_profiles"
+
+    user_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    company: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_intent_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    booked_before: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_visit_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
+
+    user: Mapped["User"] = relationship(back_populates="profile")
 
 
 class Session(Base):

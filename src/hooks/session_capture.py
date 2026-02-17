@@ -5,6 +5,7 @@ Used as on_session_end callback for the LiveKit agent server.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import uuid
@@ -29,6 +30,32 @@ def _identity_looks_like_email(identity: str) -> bool:
     return bool(identity and re.match(r"^[^@]+@[^@]+\.[^@]+$", identity.strip()))
 
 
+def _normalize_visitor_id(identity: str) -> tuple[str | None, bool]:
+    """
+    Normalize a participant identity into a stable 32-char hex visitor id.
+
+    Preferred formats:
+    - UUID (any valid uuid string) -> uuid.hex
+    - 32-char hex
+    Fallback:
+    - sha256(identity)[:32] (still stable, but indicates frontend mismatch)
+    """
+    s = (identity or "").strip()
+    if not s:
+        return None, False
+
+    try:
+        return uuid.UUID(s).hex, False
+    except Exception:
+        pass
+
+    if re.fullmatch(r"[a-fA-F0-9]{32}", s):
+        return s.lower(), False
+
+    # Stable fallback for unexpected identity formats.
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:32], True
+
+
 def _get_participant_identity(ctx: JobContext) -> str | None:
     """Return first remote participant identity, or None if room empty."""
     try:
@@ -51,8 +78,9 @@ def _capture_sync(
     """Run R2 upload and DB writes in a thread (sync)."""
     from src.config.settings import settings
     from src.db.connection import get_engine
-    from src.db.sqlc import SessionsQuerier, UsersQuerier
+    from src.db.sqlc import SessionsQuerier, UserProfilesQuerier, UsersQuerier
     from src.db.sqlc.sessions import InsertSessionParams
+    from src.db.sqlc.user_profiles import UpsertUserProfileParams
     from src.storage import r2 as storage_r2
 
     # 1) Upload report to R2
@@ -73,20 +101,48 @@ def _capture_sync(
         engine = get_engine()
     except RuntimeError:
         return
+    visitor_id: str | None = None
     with engine.connect() as conn:
         with conn.begin():
             users = UsersQuerier(conn)
+            profiles = UserProfilesQuerier(conn)
             sessions_querier = SessionsQuerier(conn)
-            user_id = str(uuid.uuid4()).replace("-", "")[:32]
-            if participant_identity and _identity_looks_like_email(participant_identity):
-                email, name = participant_identity.strip(), None
+            user_id = uuid.uuid4().hex[:32]
+
+            email: str | None = None
+            name: str | None = None
+
+            if participant_identity:
+                if _identity_looks_like_email(participant_identity):
+                    email = participant_identity.strip()
+                else:
+                    visitor_id, used_hash = _normalize_visitor_id(participant_identity)
+                    if visitor_id and used_hash:
+                        logger.warning(
+                            "Session capture: participant identity not uuid/hex; hashed to visitor_id. identity=%r",
+                            participant_identity,
+                        )
+
+            if visitor_id:
+                user = users.upsert_user_by_visitor_id(id=user_id, visitor_id=visitor_id, email=email, name=name)
             else:
-                email = f"anon-{job_id}@session.local"
-                name = None
-            user = users.upsert_user_by_email(id=user_id, email=email, name=name)
+                # Fallback to email-based identity (or per-session anon email if missing).
+                if not email:
+                    email = f"anon-{job_id}@session.local"
+                user = users.upsert_user_by_email(id=user_id, email=email, name=name)
+
             if user:
                 user_id = user.id
             users.increment_user_session_count(id=user_id)
+            profiles.upsert_user_profile(
+                UpsertUserProfileParams(
+                    user_id=user_id,
+                    company=None,
+                    domain=None,
+                    last_intent_type=None,
+                    booked_before=None,
+                )
+            )
 
             if started_at_ts is not None:
                 started_at = datetime.fromtimestamp(started_at_ts, tz=timezone.utc)
@@ -111,8 +167,8 @@ def _capture_sync(
                 )
             )
     logger.info(
-        "Session capture: report=%s user_id=%s session_id=%s",
-        r2_key, user_id, job_id,
+        "Session capture: report=%s user_id=%s session_id=%s visitor_id=%s",
+        r2_key, user_id, job_id, visitor_id,
     )
 
 

@@ -51,9 +51,21 @@ class Session:
 @dataclasses.dataclass()
 class User:
     id: str
+    visitor_id: Optional[str]
     email: Optional[str]
     name: Optional[str]
     created_at: datetime.datetime
     last_seen_at: Optional[datetime.datetime]
     total_sessions: int
     total_bookings: int
+
+
+@dataclasses.dataclass()
+class UserProfile:
+    user_id: str
+    company: Optional[str]
+    domain: Optional[str]
+    last_intent_type: Optional[str]
+    booked_before: bool
+    last_visit_at: datetime.datetime
+    created_at: datetime.datetime

@@ -3,6 +3,7 @@ from src.db.sqlc import models
 from src.db.sqlc.analysis_results import AsyncQuerier as AnalysisResultsAsyncQuerier, Querier as AnalysisResultsQuerier
 from src.db.sqlc.bookings import AsyncQuerier as BookingsAsyncQuerier, Querier as BookingsQuerier
 from src.db.sqlc.sessions import AsyncQuerier as SessionsAsyncQuerier, Querier as SessionsQuerier
+from src.db.sqlc.user_profiles import AsyncQuerier as UserProfilesAsyncQuerier, Querier as UserProfilesQuerier
 from src.db.sqlc.users import AsyncQuerier as UsersAsyncQuerier, Querier as UsersQuerier
 
 __all__ = [
@@ -13,6 +14,8 @@ __all__ = [
     "BookingsAsyncQuerier",
     "SessionsQuerier",
     "SessionsAsyncQuerier",
+    "UserProfilesQuerier",
+    "UserProfilesAsyncQuerier",
     "UsersQuerier",
     "UsersAsyncQuerier",
 ]
