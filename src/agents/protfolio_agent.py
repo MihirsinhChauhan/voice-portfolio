@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from livekit.agents import Agent, function_tool, RunContext
+from livekit.agents import Agent, function_tool, llm, RunContext
 
 from src.agents.prompts import PORTFOLIO_ASSISTANT_INSTRUCTIONS
 
@@ -12,23 +12,317 @@ from src.agents.tools.cal_com_booking import book_meeting as calcom_book_meeting
 from src.agents.tools.cal_com_booking import get_available_slots as calcom_get_available_slots
 
 
+class ConversationState:
+    GREETING = "GREETING"
+    DISCOVER_INTENT = "DISCOVER_INTENT"
+    VALUE_EXCHANGE = "VALUE_EXCHANGE"
+    OPTIONAL_DEPTH = "OPTIONAL_DEPTH"
+    SOFT_CTA = "SOFT_CTA"
+    BOOKING_COLLECT_NAME = "BOOKING_COLLECT_NAME"
+    BOOKING_COLLECT_EMAIL = "BOOKING_COLLECT_EMAIL"
+    BOOKING_CONFIRM_EMAIL = "BOOKING_CONFIRM_EMAIL"
+    BOOKING_TIME_RANGE = "BOOKING_TIME_RANGE"
+    BOOKING_PICK_SLOT = "BOOKING_PICK_SLOT"
+    BOOKING_CONFIRM_BOOKING = "BOOKING_CONFIRM_BOOKING"
+    WARM_CLOSE = "WARM_CLOSE"
+    RECOVERY = "RECOVERY"
+    END = "END"
+
+
+class IntentType:
+    UNKNOWN = "UNKNOWN"
+    EXPLORER = "EXPLORER"
+    HIRING = "HIRING"
+    FOUNDER = "FOUNDER"
+    FASTBOOK = "FASTBOOK"
+
+
+def _text(msg: llm.ChatMessage | None) -> str:
+    return ((msg.text_content or "") if msg else "").strip()
+
+
+def _classify_intent(user_text: str) -> str:
+    t = user_text.lower()
+    if any(k in t for k in ("book", "schedule", "calendar", "meeting", "call", "chat")):
+        return IntentType.FASTBOOK
+    if any(k in t for k in ("hiring", "interview", "role", "position", "candidate", "recruit")):
+        return IntentType.HIRING
+    if any(
+        k in t
+        for k in (
+            "startup",
+            "founder",
+            "cofounder",
+            "cto",
+            "fundraising",
+            "seed",
+            "series",
+            "building",
+            "product",
+            "users",
+            "customers",
+        )
+    ):
+        return IntentType.FOUNDER
+    return IntentType.EXPLORER
+
+
+def _is_depth_request(user_text: str) -> bool:
+    t = user_text.lower()
+    return any(
+        k in t
+        for k in (
+            "details",
+            "go deeper",
+            "deep dive",
+            "tell me more",
+            "how does",
+            "walk me through",
+            "architecture",
+            "design",
+        )
+    )
+
+
+def _wants_booking(user_text: str) -> bool:
+    t = user_text.lower()
+    return any(k in t for k in ("book", "schedule", "set up a call", "calendly", "calendar", "meeting"))
+
+
+def _build_memory_context(userdata: "BookingUserData") -> str | None:
+    """Layer 3: optional, soft memory context (kept intentionally non-creepy)."""
+    if not userdata.memory_hint:
+        return None
+    hint = userdata.memory_hint.strip()
+    if not hint:
+        return None
+    return (
+        "Memory context (use lightly, with uncertainty hedges; never quote verbatim):\n"
+        f"- {hint}"
+    )
+
+
+def _build_state_instruction(userdata: "BookingUserData") -> str:
+    """Layer 2: per-turn instruction based on the current state."""
+    base = (
+        "Voice output contract:\n"
+        "- plain text only\n"
+        "- 1 to 3 sentences by default\n"
+        "- at most 1 question\n"
+        "- calm, not salesy\n"
+        "- no lists, markdown, emojis, or code\n"
+    )
+
+    state = userdata.state or ConversationState.DISCOVER_INTENT
+    intent = userdata.intent_type or IntentType.UNKNOWN
+
+    if state == ConversationState.DISCOVER_INTENT:
+        return (
+            f"You are in state: {state}. Intent guess: {intent}.\n"
+            f"{base}\n"
+            "Goal for this turn: warmly discover why they're here. Ask one simple question if needed."
+        )
+
+    if state == ConversationState.VALUE_EXCHANGE:
+        return (
+            f"You are in state: {state}. Intent: {intent}.\n"
+            f"{base}\n"
+            "Goal for this turn: answer concisely, give just enough context, then offer one optional next step."
+        )
+
+    if state == ConversationState.OPTIONAL_DEPTH:
+        return (
+            f"You are in state: {state}. Intent: {intent}.\n"
+            f"{base}\n"
+            "Goal for this turn: go deeper only on what they asked, avoid info-dumping, then check if that helps."
+        )
+
+    if state == ConversationState.SOFT_CTA:
+        return (
+            f"You are in state: {state}. Intent: {intent}.\n"
+            f"{base}\n"
+            "Goal for this turn: gently offer a short call as an option (once), without pressure."
+        )
+
+    if state == ConversationState.BOOKING_COLLECT_NAME:
+        return (
+            f"You are in booking state: {state}.\n"
+            f"{base}\n"
+            "Goal for this turn: ask for their name by voice. When provided, call set_name."
+        )
+
+    if state == ConversationState.BOOKING_COLLECT_EMAIL:
+        return (
+            f"You are in booking state: {state}.\n"
+            f"{base}\n"
+            "Goal for this turn: ask them to type their email for accuracy. When provided, call set_email."
+        )
+
+    if state == ConversationState.BOOKING_CONFIRM_EMAIL:
+        return (
+            f"You are in booking state: {state}.\n"
+            f"{base}\n"
+            "Goal for this turn: repeat the email once and ask for confirmation, then proceed."
+        )
+
+    if state == ConversationState.BOOKING_TIME_RANGE:
+        return (
+            f"You are in booking state: {state}.\n"
+            f"{base}\n"
+            "Goal for this turn: ask for a date range (or a couple days) and their timezone. "
+            "If they use relative dates, call get_current_datetime first."
+        )
+
+    if state == ConversationState.BOOKING_PICK_SLOT:
+        return (
+            f"You are in booking state: {state}.\n"
+            f"{base}\n"
+            "Goal for this turn: call get_available_slots for the range, then offer a few options simply."
+        )
+
+    if state == ConversationState.BOOKING_CONFIRM_BOOKING:
+        return (
+            f"You are in booking state: {state}.\n"
+            f"{base}\n"
+            "Goal for this turn: restate date/time/timezone and ask for final confirmation before calling book_meeting."
+        )
+
+    if state == ConversationState.WARM_CLOSE:
+        return (
+            f"You are in state: {state}.\n"
+            f"{base}\n"
+            "Goal for this turn: close warmly and lightly. Do not push booking."
+        )
+
+    if state == ConversationState.RECOVERY:
+        return (
+            f"You are in state: {state}.\n"
+            f"{base}\n"
+            "Goal for this turn: acknowledge any confusion or silence, restate the gist in simpler terms, "
+            "and offer one clear next option."
+        )
+
+    if state == ConversationState.END:
+        return (
+            f"You are in state: {state}.\n"
+            f"{base}\n"
+            "Goal for this turn: keep it to a short, warm sign-off. Do not introduce new topics."
+        )
+
+    return (
+        f"You are in state: {state}. Intent: {intent}.\n"
+        f"{base}\n"
+        "Goal for this turn: keep it helpful, brief, and move the conversation forward."
+    )
+
+
 @dataclass
 class BookingUserData:
     """Stored profile for the current session (used when booking meetings)."""
     name: str | None = None
     email: str | None = None
+    # Phase 3: explicit conversation state tracking
+    state: str = ConversationState.GREETING
+    intent_type: str = IntentType.UNKNOWN
+    booking_offer_count: int = 0
+    # Phase 3 hook point for Phase 1 memory. Keep this soft & optional.
+    memory_hint: str | None = None
 
 
 class PortfolioAssistant(Agent):
     def __init__(self) -> None:
-        instructions = (
-            PORTFOLIO_ASSISTANT_INSTRUCTIONS
-            + f"\n\n--------------------------------\nDATE AND TIME\n--------------------------------\n"
-            f"For natural language like \"tomorrow\", \"next Monday\", or \"this week\", call get_current_datetime first "
-            f"(optionally with the user's timezone, e.g. Asia/Kolkata if they said they're in India). "
-            f"Use the result to compute the correct YYYY-MM-DD for get_available_slots and book_meeting."
+        super().__init__(instructions=PORTFOLIO_ASSISTANT_INSTRUCTIONS)
+
+    async def on_enter(self) -> None:
+        # Phase 3: move initial greeting into the agent lifecycle hook.
+        self.session.userdata.state = ConversationState.GREETING  # type: ignore[attr-defined]
+        await self.session.generate_reply(
+            instructions=(
+                "Greet the user briefly. Introduce yourself as Melvin who helps explain Mihir's work. "
+                "Ask one simple question about what brought them here."
+            )
         )
-        super().__init__(instructions=instructions)
+        self.session.userdata.state = ConversationState.DISCOVER_INTENT  # type: ignore[attr-defined]
+
+    async def on_user_turn_completed(
+        self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
+    ) -> None:
+        # Phase 3: lightweight routing to update state/intent, then inject Layer 2 + Layer 3.
+        ud: BookingUserData = self.session.userdata  # type: ignore[assignment]
+        user_text = _text(new_message)
+
+        # Very short backchannels ("yes", "ok") should not thrash state/intent.
+        if user_text and len(user_text.split()) >= 3:
+            ud.intent_type = _classify_intent(user_text)
+
+        # Do not change state once we've reached END.
+        if ud.state == ConversationState.END:
+            turn_ctx.add_message(role="developer", content=_build_state_instruction(ud))
+            mem = _build_memory_context(ud)
+            if mem:
+                turn_ctx.add_message(role="developer", content=mem)
+            return
+
+        # Booking takes precedence when user explicitly requests it.
+        booking_states = {
+            ConversationState.BOOKING_COLLECT_NAME,
+            ConversationState.BOOKING_COLLECT_EMAIL,
+            ConversationState.BOOKING_CONFIRM_EMAIL,
+            ConversationState.BOOKING_TIME_RANGE,
+            ConversationState.BOOKING_PICK_SLOT,
+            ConversationState.BOOKING_CONFIRM_BOOKING,
+        }
+
+        if _wants_booking(user_text):
+            if not ud.name:
+                ud.state = ConversationState.BOOKING_COLLECT_NAME
+            elif not ud.email:
+                ud.state = ConversationState.BOOKING_COLLECT_EMAIL
+            else:
+                ud.state = ConversationState.BOOKING_TIME_RANGE
+        else:
+            # Keep booking substates sticky unless the user clearly abandons.
+            if ud.state in booking_states:
+                pass
+            else:
+                if not user_text:
+                    ud.state = ConversationState.RECOVERY
+                elif _is_depth_request(user_text):
+                    ud.state = ConversationState.OPTIONAL_DEPTH
+                elif ud.state in (
+                    ConversationState.GREETING,
+                    ConversationState.DISCOVER_INTENT,
+                ):
+                    ud.state = ConversationState.DISCOVER_INTENT
+                else:
+                    ud.state = ConversationState.VALUE_EXCHANGE
+
+                # Soft CTA gating: keep it conservative but with broader signals.
+                soft_cta_triggers = (
+                    "help",
+                    "work together",
+                    "collaborate",
+                    "fit",
+                    "hire",
+                    "bring him in",
+                    "interesting",
+                    "relevant",
+                    "sounds good",
+                    "makes sense",
+                )
+                if user_text and ud.booking_offer_count < 1 and any(
+                    k in user_text.lower() for k in soft_cta_triggers
+                ):
+                    ud.state = ConversationState.SOFT_CTA
+                    ud.booking_offer_count += 1
+
+        # Layer 2: state instruction (developer message, ephemeral for this turn)
+        turn_ctx.add_message(role="developer", content=_build_state_instruction(ud))
+
+        # Layer 3: memory context (developer message, ephemeral)
+        mem = _build_memory_context(ud)
+        if mem:
+            turn_ctx.add_message(role="developer", content=mem)
 
     @function_tool(
         name="get_current_datetime",
@@ -63,6 +357,9 @@ class PortfolioAssistant(Agent):
             value: The full name the user provided.
         """
         context.userdata.name = value.strip()
+        # Advance booking state when appropriate.
+        if context.userdata.state == ConversationState.BOOKING_COLLECT_NAME:
+            context.userdata.state = ConversationState.BOOKING_COLLECT_EMAIL
         result = f"Got it, I have your name as {context.userdata.name}."
         logger.info("set_name: value=%s -> result=%s", value, result)
         return result
@@ -77,6 +374,8 @@ class PortfolioAssistant(Agent):
             value: The email address the user provided.
         """
         context.userdata.email = value.strip()
+        if context.userdata.state == ConversationState.BOOKING_COLLECT_EMAIL:
+            context.userdata.state = ConversationState.BOOKING_TIME_RANGE
         result = f"Got it, I have your email as {context.userdata.email}."
         logger.info("set_email: value=%s -> result=%s", value, result)
         return result
@@ -114,7 +413,7 @@ class PortfolioAssistant(Agent):
         attendee_email: str,
         date: str,
         time_slot: str,
-            timezone: str = "Asia/Kolkata",
+        timezone: str = "Asia/Kolkata",
         notes: str = "",
     ) -> str:
         """Book a meeting with the founder using Cal.com. Use this only after the user has chosen a date and time from the available slots you showed them. Use stored name and email from set_name/set_email when the user already provided them; otherwise pass them here.
@@ -145,6 +444,8 @@ class PortfolioAssistant(Agent):
             timezone=timezone,
             notes=notes or None,
         )
+        # Booking succeeded/failed is handled by the tool's output; transition to warm close optimistically.
+        context.userdata.state = ConversationState.WARM_CLOSE
         logger.info(
             "book_meeting: attendee=%s date=%s time_slot=%s -> result=%s",
             name, date, time_slot, result,

@@ -25,7 +25,3 @@ async def portfolio_agent_handler(ctx: agents.JobContext):
             ),
         ),
     )
-
-    await session.generate_reply(
-        instructions="Greet the user introudcing yourself and offer your assistance."
-    )
