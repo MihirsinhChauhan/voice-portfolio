@@ -91,14 +91,54 @@ def _wants_booking(user_text: str) -> bool:
 
 def _build_memory_context(userdata: "BookingUserData") -> str | None:
     """Layer 3: optional, soft memory context (kept intentionally non-creepy)."""
-    if not userdata.memory_hint:
+    # Primary source: precomputed memory_hint, typically hydrated from long-term profile memory.
+    if userdata.memory_hint:
+        hint = userdata.memory_hint.strip()
+        if hint:
+            return (
+                "Memory context (use lightly, with uncertainty hedges; never quote verbatim):\n"
+                f"- {hint}"
+            )
+
+    # Fallback: derive a very small amount of context from session-level fields.
+    bits: list[str] = []
+
+    # Intent: helpful for framing questions, but keep it soft.
+    if getattr(userdata, "intent_type", IntentType.UNKNOWN) != IntentType.UNKNOWN:
+        bits.append(
+            "From earlier in the conversation, they seem to be this intent type "
+            f"(not certain): {userdata.intent_type}."
+        )
+
+    # Booking history: only a light nudge, never pressure.
+    if getattr(userdata, "booked_before", False):
+        bits.append(
+            "It looks like they may have booked a call with Mihir before. "
+            "If you mention this, hedge with phrases like 'if I remember right' "
+            "and do not be intense or salesy about it."
+        )
+
+    # Company/domain are high-value but optional; use only if present.
+    company = getattr(userdata, "company", None)
+    domain = getattr(userdata, "domain", None)
+    if company or domain:
+        detail_parts: list[str] = []
+        if company:
+            detail_parts.append(f"company: {company}")
+        if domain:
+            detail_parts.append(f"domain or area: {domain}")
+        bits.append(
+            "They have previously shared a bit about their background; "
+            + ", ".join(detail_parts)
+            + ". Use this only when directly relevant, and never quote past turns verbatim."
+        )
+
+    if not bits:
         return None
-    hint = userdata.memory_hint.strip()
-    if not hint:
-        return None
+
     return (
         "Memory context (use lightly, with uncertainty hedges; never quote verbatim):\n"
-        f"- {hint}"
+        + "\n".join(f"- {b}" for b in bits)
     )
 
 
@@ -221,6 +261,11 @@ class BookingUserData:
     """Stored profile for the current session (used when booking meetings)."""
     name: str | None = None
     email: str | None = None
+    # Optional profile-style memory captured within the session. These may be
+    # hydrated from / written back to long-term user profile storage.
+    company: str | None = None
+    domain: str | None = None
+    booked_before: bool = False
     # Phase 3: explicit conversation state tracking
     state: str = ConversationState.GREETING
     intent_type: str = IntentType.UNKNOWN
@@ -394,16 +439,30 @@ class PortfolioAssistant(Agent):
             end_date: End of range in YYYY-MM-DD format (e.g. 2025-02-16).
             timezone: IANA timezone for the user (e.g. Asia/Kolkata for India). Use Asia/Kolkata if user is in India or timezone unknown.
         """
-        result = await calcom_get_available_slots(
-            start_date=start_date,
-            end_date=end_date,
-            timezone=timezone,
-        )
-        logger.info(
-            "get_available_slots: start_date=%s end_date=%s timezone=%s -> result=%s",
-            start_date, end_date, timezone, result,
-        )
-        return result
+        try:
+            result = await calcom_get_available_slots(
+                start_date=start_date,
+                end_date=end_date,
+                timezone=timezone,
+            )
+            logger.info(
+                "get_available_slots: start_date=%s end_date=%s timezone=%s -> result=%s",
+                start_date,
+                end_date,
+                timezone,
+                result,
+            )
+            return result
+        except Exception as e:  # pragma: no cover - defensive, should be rare
+            # Phase 4: error-safe behavior. The tool should never crash the agent;
+            # instead, return guidance that leads to a calm, single apology and a fallback.
+            logger.warning("get_available_slots: cal.com error: %s", e, exc_info=True)
+            return (
+                "ERROR: get_available_slots failed due to a booking system or configuration issue. "
+                "When you respond to the user, briefly apologize once, explain that the booking "
+                "system is having trouble, and offer a simple fallback like suggesting a couple "
+                "of days and times they can mention, or letting them follow up over email instead."
+            )
 
     @function_tool()
     async def book_meeting(
@@ -436,18 +495,40 @@ class PortfolioAssistant(Agent):
             result = f"Cannot book yet: please ask the user for their {', '.join(missing)} and call set_name or set_email first."
             logger.info("book_meeting: skipped (missing %s) -> result=%s", missing, result)
             return result
-        result = await calcom_book_meeting(
-            attendee_name=name,
-            attendee_email=email,
-            date=date,
-            time_slot=time_slot,
-            timezone=timezone,
-            notes=notes or None,
-        )
-        # Booking succeeded/failed is handled by the tool's output; transition to warm close optimistically.
-        context.userdata.state = ConversationState.WARM_CLOSE
+        try:
+            result = await calcom_book_meeting(
+                attendee_name=name,
+                attendee_email=email,
+                date=date,
+                time_slot=time_slot,
+                timezone=timezone,
+                notes=notes or None,
+            )
+        except Exception as e:  # pragma: no cover - defensive, should be rare
+            # Phase 4: error-safe behavior for booking failures.
+            logger.warning("book_meeting: cal.com error: %s", e, exc_info=True)
+            return (
+                "ERROR: book_meeting failed due to a booking system or configuration issue. "
+                "When you respond to the user, apologize once, explain that the calendar system "
+                "is not responding correctly, and suggest a clear fallback such as sharing a "
+                "preferred time window or following up via email instead of booking live."
+            )
+
+        # Booking succeeded/failed is expressed in the underlying tool's message.
+        # Detect clear success to update memory + state.
+        if "Meeting booked successfully" in (result or ""):
+            context.userdata.booked_before = True
+            context.userdata.state = ConversationState.WARM_CLOSE
+        else:
+            # Even when booking fails, do not loop endlessly in booking states.
+            # Let the assistant move toward a warm close or alternative suggestion.
+            context.userdata.state = ConversationState.WARM_CLOSE
+
         logger.info(
             "book_meeting: attendee=%s date=%s time_slot=%s -> result=%s",
-            name, date, time_slot, result,
+            name,
+            date,
+            time_slot,
+            result,
         )
         return result

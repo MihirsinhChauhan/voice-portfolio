@@ -102,6 +102,17 @@ def _capture_sync(
     except RuntimeError:
         return
     visitor_id: str | None = None
+    # Simple heuristic: check if a successful booking message appears anywhere
+    # in the session report. This lets us mark both the session row and the
+    # long-term user profile as "booked_before" without wiring a separate
+    # channel from the agent.
+    report_text = ""
+    try:
+        report_text = json.dumps(report_dict, default=str)
+    except Exception:
+        report_text = str(report_dict)
+    booking_made = "Meeting booked successfully" in report_text
+
     with engine.connect() as conn:
         with conn.begin():
             users = UsersQuerier(conn)
@@ -140,7 +151,9 @@ def _capture_sync(
                     company=None,
                     domain=None,
                     last_intent_type=None,
-                    booked_before=None,
+                    # Phase 5: mark users as having booked at least once when
+                    # we detect a successful booking in the session report.
+                    booked_before=booking_made or None,
                 )
             )
 
@@ -160,7 +173,8 @@ def _capture_sync(
                     started_at=started_at,
                     ended_at=ended_at,
                     duration_sec=duration_int,
-                    booking_made=False,
+                    # Phase 5: persist whether a booking was made in this session.
+                    booking_made=booking_made,
                     analysis_version=1,
                     r2_report_path=r2_path,
                     r2_audio_path=None,
