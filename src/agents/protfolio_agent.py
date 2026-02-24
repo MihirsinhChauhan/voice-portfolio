@@ -18,9 +18,7 @@ class ConversationState:
     VALUE_EXCHANGE = "VALUE_EXCHANGE"
     OPTIONAL_DEPTH = "OPTIONAL_DEPTH"
     SOFT_CTA = "SOFT_CTA"
-    BOOKING_COLLECT_NAME = "BOOKING_COLLECT_NAME"
-    BOOKING_COLLECT_EMAIL = "BOOKING_COLLECT_EMAIL"
-    BOOKING_CONFIRM_EMAIL = "BOOKING_CONFIRM_EMAIL"
+    BOOKING_COLLECT_NAME_AND_EMAIL = "BOOKING_COLLECT_NAME_AND_EMAIL"
     BOOKING_TIME_RANGE = "BOOKING_TIME_RANGE"
     BOOKING_PICK_SLOT = "BOOKING_PICK_SLOT"
     BOOKING_CONFIRM_BOOKING = "BOOKING_CONFIRM_BOOKING"
@@ -34,7 +32,6 @@ class IntentType:
     EXPLORER = "EXPLORER"
     HIRING = "HIRING"
     FOUNDER = "FOUNDER"
-    FASTBOOK = "FASTBOOK"
 
 
 def _text(msg: llm.ChatMessage | None) -> str:
@@ -43,8 +40,6 @@ def _text(msg: llm.ChatMessage | None) -> str:
 
 def _classify_intent(user_text: str) -> str:
     t = user_text.lower()
-    if any(k in t for k in ("book", "schedule", "calendar", "meeting", "call", "chat")):
-        return IntentType.FASTBOOK
     if any(k in t for k in ("hiring", "interview", "role", "position", "candidate", "recruit")):
         return IntentType.HIRING
     if any(
@@ -157,6 +152,21 @@ def _build_state_instruction(userdata: "BookingUserData") -> str:
     intent = userdata.intent_type or IntentType.UNKNOWN
 
     if state == ConversationState.DISCOVER_INTENT:
+        if intent == IntentType.FOUNDER:
+            return (
+                f"You are in state: {state}. Intent: {intent}.\n"
+                f"{base}\n"
+                "Goal: They are a founder evaluating an engineer to work with or hire. Mihir is not "
+                "a co-founder. Your first 1-2 sentences MUST describe Mihir's experience as an "
+                "engineer and how he could fit (e.g. ownership, backend, shipping). "
+                "If they have already specified what role/responsibilities they're looking for "
+                "(e.g. 'engineer for backend', 'help with systems'), respond directly to that match "
+                "without asking any questions. Only ask 'what they're building' or 'what problem "
+                "they're solving' if they have NOT specified what role/responsibilities they need. "
+                "CRITICAL: Do NOT ask for their name, email, or contact information. Do NOT call "
+                "set_name, set_email, or any booking tools. Do NOT offer to schedule a call yet. "
+                "Focus ONLY on describing Mihir's experience and fit."
+            )
         return (
             f"You are in state: {state}. Intent guess: {intent}.\n"
             f"{base}\n"
@@ -181,36 +191,35 @@ def _build_state_instruction(userdata: "BookingUserData") -> str:
         return (
             f"You are in state: {state}. Intent: {intent}.\n"
             f"{base}\n"
-            "Goal for this turn: gently offer a short call as an option (once), without pressure."
+            "Goal for this turn: gently offer a short call as an option, once, without pressure. "
+            "Do not call set_name, set_email, or any tools. Do not ask for name, email, or any "
+            "contact details. Your entire message must be only the offer. "
+            "Example: 'If helpful, we could set up a short call with Mihir to explore fit.'"
         )
 
-    if state == ConversationState.BOOKING_COLLECT_NAME:
+    if state == ConversationState.BOOKING_COLLECT_NAME_AND_EMAIL:
         return (
-            f"You are in booking state: {state}.\n"
+            f"You are in booking state: {state}. You do not have the user's name and email stored yet.\n"
             f"{base}\n"
-            "Goal for this turn: ask for their name by voice. When provided, call set_name."
-        )
-
-    if state == ConversationState.BOOKING_COLLECT_EMAIL:
-        return (
-            f"You are in booking state: {state}.\n"
-            f"{base}\n"
-            "Goal for this turn: ask them to type their email for accuracy. When provided, call set_email."
-        )
-
-    if state == ConversationState.BOOKING_CONFIRM_EMAIL:
-        return (
-            f"You are in booking state: {state}.\n"
-            f"{base}\n"
-            "Goal for this turn: repeat the email once and ask for confirmation, then proceed."
+            "CRITICAL: Do NOT call get_available_slots, book_meeting, or get_current_datetime in this turn. "
+            "CRITICAL: Do NOT infer, guess, or make up names or emails. Only call set_name and set_email "
+            "if the user's message explicitly contains both their full name AND email address. "
+            "If the user has NOT provided both name and email in this message, do not call ANY tools; "
+            "only reply with one message asking them to type their full name and email together "
+            "(e.g. 'Please type your full name and email so we can set up the call.' or "
+            "'To get started, please share your full name and email address.'). "
+            "You must collect name and email BEFORE showing available slots. "
+            "Always ask for BOTH name and email together in a single request."
         )
 
     if state == ConversationState.BOOKING_TIME_RANGE:
         return (
             f"You are in booking state: {state}.\n"
             f"{base}\n"
-            "Goal for this turn: ask for a date range (or a couple days) and their timezone. "
-            "If they use relative dates, call get_current_datetime first."
+            "CRITICAL: Do NOT call get_available_slots or book_meeting in this turn. "
+            "Your only job is to ask the user for a date range (or a couple days) and their timezone. "
+            "Example: 'When would you like to meet? Do you have a date range in mind?' "
+            "Wait for the user to provide a date range before calling get_available_slots."
         )
 
     if state == ConversationState.BOOKING_PICK_SLOT:
@@ -283,8 +292,9 @@ class PortfolioAssistant(Agent):
         self.session.userdata.state = ConversationState.GREETING  # type: ignore[attr-defined]
         await self.session.generate_reply(
             instructions=(
-                "Greet the user briefly. Introduce yourself as Melvin who helps explain Mihir's work. "
-                "Ask one simple question about what brought them here."
+                "You must output exactly the following text, word for word, with no additions, "
+                "changes, or paraphrasing: Hi, I'm Melvin. I help explain Mihir's work and connect "
+                "people with him. What brought you here today?"
             )
         )
         self.session.userdata.state = ConversationState.DISCOVER_INTENT  # type: ignore[attr-defined]
@@ -310,20 +320,18 @@ class PortfolioAssistant(Agent):
 
         # Booking takes precedence when user explicitly requests it.
         booking_states = {
-            ConversationState.BOOKING_COLLECT_NAME,
-            ConversationState.BOOKING_COLLECT_EMAIL,
-            ConversationState.BOOKING_CONFIRM_EMAIL,
+            ConversationState.BOOKING_COLLECT_NAME_AND_EMAIL,
             ConversationState.BOOKING_TIME_RANGE,
             ConversationState.BOOKING_PICK_SLOT,
             ConversationState.BOOKING_CONFIRM_BOOKING,
         }
 
         if _wants_booking(user_text):
-            if not ud.name:
-                ud.state = ConversationState.BOOKING_COLLECT_NAME
-            elif not ud.email:
-                ud.state = ConversationState.BOOKING_COLLECT_EMAIL
-            else:
+            if not ud.name or not ud.email:
+                ud.state = ConversationState.BOOKING_COLLECT_NAME_AND_EMAIL
+            elif ud.name and ud.email:
+                # Only transition to TIME_RANGE if we have both name and email
+                # This ensures we ask for time range in the NEXT turn after collecting email
                 ud.state = ConversationState.BOOKING_TIME_RANGE
         else:
             # Keep booking substates sticky unless the user clearly abandons.
@@ -343,6 +351,7 @@ class PortfolioAssistant(Agent):
                     ud.state = ConversationState.VALUE_EXCHANGE
 
                 # Soft CTA gating: keep it conservative but with broader signals.
+                # Do NOT trigger soft CTA for FOUNDER intent in DISCOVER_INTENT state
                 soft_cta_triggers = (
                     "help",
                     "work together",
@@ -355,9 +364,10 @@ class PortfolioAssistant(Agent):
                     "sounds good",
                     "makes sense",
                 )
-                if user_text and ud.booking_offer_count < 1 and any(
-                    k in user_text.lower() for k in soft_cta_triggers
-                ):
+                if (user_text and ud.booking_offer_count < 1 
+                    and ud.state != ConversationState.DISCOVER_INTENT 
+                    and ud.intent_type != IntentType.FOUNDER
+                    and any(k in user_text.lower() for k in soft_cta_triggers)):
                     ud.state = ConversationState.SOFT_CTA
                     ud.booking_offer_count += 1
 
@@ -394,32 +404,30 @@ class PortfolioAssistant(Agent):
 
     @function_tool(
         name="set_name",
-        description="Call this when the user has provided their full name. Store it for the booking.",
+        description="Call this ONLY when the user has explicitly provided their full name in their message. Do NOT infer or guess names. Store it for the booking.",
     )
     async def set_name(self, context: RunContext[BookingUserData], value: str) -> str:
-        """Store the user's name for the current session. Call when the user says their name.
+        """Store the user's name for the current session. Call ONLY when the user explicitly says their name.
         Args:
-            value: The full name the user provided.
+            value: The full name the user explicitly provided. Do NOT infer or make up names.
         """
         context.userdata.name = value.strip()
-        # Advance booking state when appropriate.
-        if context.userdata.state == ConversationState.BOOKING_COLLECT_NAME:
-            context.userdata.state = ConversationState.BOOKING_COLLECT_EMAIL
         result = f"Got it, I have your name as {context.userdata.name}."
         logger.info("set_name: value=%s -> result=%s", value, result)
         return result
 
     @function_tool(
         name="set_email",
-        description="Call this when the user has provided their email address. Store it for the booking.",
+        description="Call this ONLY when the user has explicitly provided their email address in their message. Do NOT infer or guess emails. Store it for the booking.",
     )
     async def set_email(self, context: RunContext[BookingUserData], value: str) -> str:
-        """Store the user's email for the current session. Call when the user says their email.
+        """Store the user's email for the current session. Call ONLY when the user explicitly says their email.
         Args:
-            value: The email address the user provided.
+            value: The email address the user explicitly provided. Do NOT infer or make up emails.
         """
         context.userdata.email = value.strip()
-        if context.userdata.state == ConversationState.BOOKING_COLLECT_EMAIL:
+        if context.userdata.state == ConversationState.BOOKING_COLLECT_NAME_AND_EMAIL:
+            # Transition to TIME_RANGE so next turn asks for time range
             context.userdata.state = ConversationState.BOOKING_TIME_RANGE
         result = f"Got it, I have your email as {context.userdata.email}."
         logger.info("set_email: value=%s -> result=%s", value, result)
@@ -433,7 +441,7 @@ class PortfolioAssistant(Agent):
         end_date: str,
         timezone: str = "Asia/Kolkata",
     ) -> str:
-        """Get available meeting slots from Cal.com for a date range. Call this first when the user wants to book a meeting, so you can tell them which times are free before they choose.
+        """Get available meeting slots from Cal.com for a date range. Only call this AFTER you have collected the user's name and email. Do not call this if you are in BOOKING_COLLECT_NAME_AND_EMAIL state. Call this when the user wants to book a meeting and you already have their name and email, so you can tell them which times are free before they choose.
         Args:
             start_date: Start of range in YYYY-MM-DD format (e.g. 2025-02-10).
             end_date: End of range in YYYY-MM-DD format (e.g. 2025-02-16).
