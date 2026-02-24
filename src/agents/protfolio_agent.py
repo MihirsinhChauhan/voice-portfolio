@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -75,6 +76,26 @@ def _is_depth_request(user_text: str) -> bool:
             "walk me through",
             "architecture",
             "design",
+        )
+    )
+
+
+def _wants_end(user_text: str) -> bool:
+    t = user_text.lower()
+    return any(
+        k in t
+        for k in (
+            "bye",
+            "goodbye",
+            "good bye",
+            "end the call",
+            "end this call",
+            "end call",
+            "hang up",
+            "that's all",
+            "that is all",
+            "we are done",
+            "we're done",
         )
     )
 
@@ -286,6 +307,7 @@ class BookingUserData:
 class PortfolioAssistant(Agent):
     def __init__(self) -> None:
         super().__init__(instructions=PORTFOLIO_ASSISTANT_INSTRUCTIONS)
+        self._end_requested: bool = False
 
     async def on_enter(self) -> None:
         # Phase 3: move initial greeting into the agent lifecycle hook.
@@ -306,6 +328,10 @@ class PortfolioAssistant(Agent):
         ud: BookingUserData = self.session.userdata  # type: ignore[assignment]
         user_text = _text(new_message)
 
+        if user_text and _wants_end(user_text):
+            ud.state = ConversationState.END
+            self._end_requested = True
+
         # Very short backchannels ("yes", "ok") should not thrash state/intent.
         if user_text and len(user_text.split()) >= 3:
             ud.intent_type = _classify_intent(user_text)
@@ -316,6 +342,8 @@ class PortfolioAssistant(Agent):
             mem = _build_memory_context(ud)
             if mem:
                 turn_ctx.add_message(role="developer", content=mem)
+            if self._end_requested:
+                asyncio.create_task(self._close_after_delay())
             return
 
         # Booking takes precedence when user explicitly requests it.
@@ -378,6 +406,13 @@ class PortfolioAssistant(Agent):
         mem = _build_memory_context(ud)
         if mem:
             turn_ctx.add_message(role="developer", content=mem)
+
+    async def _close_after_delay(self, delay: float = 1.0) -> None:
+        await asyncio.sleep(delay)
+        try:
+            await self.session.aclose()
+        except Exception as e:
+            logger.warning("PortfolioAssistant: failed to close session: %s", e)
 
     @function_tool(
         name="get_current_datetime",
