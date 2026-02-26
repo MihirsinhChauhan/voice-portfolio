@@ -74,11 +74,15 @@ def _capture_sync(
     participant_identity: str | None,
     started_at_ts: float | None,
     duration_sec: float | None,
+    conv_name: str | None = None,
+    conv_email: str | None = None,
+    booking_details=None,
 ) -> None:
     """Run R2 upload and DB writes in a thread (sync)."""
     from src.config.settings import settings
     from src.db.connection import get_engine
-    from src.db.sqlc import SessionsQuerier, UserProfilesQuerier, UsersQuerier
+    from src.db.sqlc import BookingsQuerier, SessionsQuerier, UserProfilesQuerier, UsersQuerier
+    from src.db.sqlc.bookings import InsertBookingParams
     from src.db.sqlc.sessions import InsertSessionParams
     from src.db.sqlc.user_profiles import UpsertUserProfileParams
     from src.storage import r2 as storage_r2
@@ -118,6 +122,7 @@ def _capture_sync(
             users = UsersQuerier(conn)
             profiles = UserProfilesQuerier(conn)
             sessions_querier = SessionsQuerier(conn)
+            bookings_querier = BookingsQuerier(conn)
             user_id = uuid.uuid4().hex[:32]
 
             email: str | None = None
@@ -133,6 +138,12 @@ def _capture_sync(
                             "Session capture: participant identity not uuid/hex; hashed to visitor_id. identity=%r",
                             participant_identity,
                         )
+
+            # Prefer conversation-collected name/email over identity heuristics.
+            if conv_name:
+                name = conv_name
+            if conv_email:
+                email = conv_email
 
             if visitor_id:
                 user = users.upsert_user_by_visitor_id(id=user_id, visitor_id=visitor_id, email=email, name=name)
@@ -180,6 +191,26 @@ def _capture_sync(
                     r2_audio_path=None,
                 )
             )
+
+            if booking_made:
+                users.increment_user_booking_count(id=user_id)
+                if booking_details is not None:
+                    try:
+                        scheduled_dt = datetime.fromisoformat(
+                            booking_details.scheduled_time_utc_iso.replace("Z", "+00:00")
+                        )
+                        bookings_querier.insert_booking(
+                            InsertBookingParams(
+                                id=uuid.uuid4().hex[:32],
+                                session_id=job_id,
+                                user_id=user_id,
+                                scheduled_time=scheduled_dt,
+                                timezone=booking_details.timezone,
+                                status="scheduled",
+                            )
+                        )
+                    except Exception as e:
+                        logger.warning("Session capture: failed to insert booking row: %s", e)
     logger.info(
         "Session capture: report=%s user_id=%s session_id=%s visitor_id=%s",
         r2_key, user_id, job_id, visitor_id,
@@ -205,6 +236,18 @@ async def on_session_end(ctx: JobContext) -> None:
     duration = getattr(report, "duration", None)
     participant_identity = _get_participant_identity(ctx)
 
+    # Extract name/email/booking_details collected during the conversation.
+    conv_name: str | None = None
+    conv_email: str | None = None
+    booking_details = None
+    try:
+        ud = ctx.primary_session.userdata
+        conv_name = getattr(ud, "name", None)
+        conv_email = getattr(ud, "email", None)
+        booking_details = getattr(ud, "booking_details", None)
+    except Exception as e:
+        logger.warning("Session capture: could not read userdata: %s", e)
+
     await asyncio.to_thread(
         _capture_sync,
         report_dict,
@@ -214,4 +257,7 @@ async def on_session_end(ctx: JobContext) -> None:
         participant_identity,
         started_at,
         duration,
+        conv_name,
+        conv_email,
+        booking_details,
     )

@@ -7,10 +7,11 @@ from zoneinfo import ZoneInfo
 from livekit.agents import Agent, function_tool, llm, RunContext
 
 from src.agents.prompts import PORTFOLIO_ASSISTANT_INSTRUCTIONS
-
-logger = logging.getLogger(__name__)
+from src.agents.tools.cal_com_booking import _build_start_utc_iso
 from src.agents.tools.cal_com_booking import book_meeting as calcom_book_meeting
 from src.agents.tools.cal_com_booking import get_available_slots as calcom_get_available_slots
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationState:
@@ -287,6 +288,12 @@ def _build_state_instruction(userdata: "BookingUserData") -> str:
 
 
 @dataclass
+class BookingDetails:
+    scheduled_time_utc_iso: str  # ISO UTC datetime of the meeting
+    timezone: str                # IANA timezone for the attendee
+
+
+@dataclass
 class BookingUserData:
     """Stored profile for the current session (used when booking meetings)."""
     name: str | None = None
@@ -302,6 +309,8 @@ class BookingUserData:
     booking_offer_count: int = 0
     # Phase 3 hook point for Phase 1 memory. Keep this soft & optional.
     memory_hint: str | None = None
+    # Populated on successful booking for DB persistence.
+    booking_details: BookingDetails | None = None
 
 
 class PortfolioAssistant(Agent):
@@ -562,6 +571,14 @@ class PortfolioAssistant(Agent):
         if "Meeting booked successfully" in (result or ""):
             context.userdata.booked_before = True
             context.userdata.state = ConversationState.WARM_CLOSE
+            try:
+                utc_iso = _build_start_utc_iso(date, time_slot, timezone)
+                context.userdata.booking_details = BookingDetails(
+                    scheduled_time_utc_iso=utc_iso,
+                    timezone=timezone,
+                )
+            except Exception as e:
+                logger.warning("book_meeting: could not build BookingDetails: %s", e)
         else:
             # Even when booking fails, do not loop endlessly in booking states.
             # Let the assistant move toward a warm close or alternative suggestion.
