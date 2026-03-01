@@ -123,4 +123,22 @@
   body {
     @apply bg-background text-foreground;
   }
+  html {
+    background-color: #050508;
+  }
+}
+
+@theme inline {
+  --font-display: var(--font-space-grotesk);
+}
+
+@keyframes talk-bg-shift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes talk-ambient-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(1.15); }
 }

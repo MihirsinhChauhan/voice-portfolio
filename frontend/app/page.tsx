@@ -1,49 +1,103 @@
-import Link from "next/link";
+'use client';
+
+import { useState, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
+import { motion } from 'motion/react';
+import { AgentAudioVisualizerAura } from '@/components/agents-ui/agent-audio-visualizer-aura';
+
+const DARK_BG_STYLE = {
+  background:
+    'radial-gradient(ellipse at 55% 45%, #1a0a3a 0%, #080810 55%, #050508 100%)',
+} as const;
 
 export default function Home() {
+  const router = useRouter();
+  const [isLeaving, setIsLeaving] = useState(false);
+
+  const handleTalkClick = useCallback(() => {
+    if (isLeaving) return;
+    setIsLeaving(true);
+  }, [isLeaving]);
+
   return (
-    <div className="min-h-screen bg-background font-sans">
-      <main className="mx-auto max-w-3xl px-6 py-24 sm:px-12">
-        {/* Hero */}
-        <section className="mb-20">
-          <h1 className="text-4xl font-bold tracking-tight text-foreground sm:text-5xl">
-            Mihir Chauhan
+    <div className="relative h-screen w-screen overflow-hidden" style={DARK_BG_STYLE}>
+      {/* Soft top violet glow */}
+      <div
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background:
+            'radial-gradient(ellipse at 48% 0%, rgba(100,60,200,0.18) 0%, transparent 55%)',
+        }}
+      />
+
+      {/* ── Desktop: side-by-side │ Mobile: stacked ── */}
+      <div className="absolute inset-0 flex flex-col items-center justify-center md:flex-row">
+
+        {/* LEFT — Name + Designation */}
+        <motion.div
+          className="w-full px-10 pb-10 pt-16 md:w-[44%] md:px-16 md:pb-0 md:pt-0"
+          initial={{ opacity: 0, x: -28 }}
+          animate={isLeaving ? { opacity: 0, x: -44 } : { opacity: 1, x: 0 }}
+          transition={{
+            duration: isLeaving ? 0.5 : 0.75,
+            ease: [0.32, 0.72, 0, 1],
+          }}
+        >
+          <h1
+            className="text-[clamp(2.6rem,5vw,4rem)] font-bold leading-[1.05] tracking-tight text-white/90"
+            style={{ fontFamily: 'var(--font-space-grotesk)' }}
+          >
+            Mihir<br />Chauhan
           </h1>
-          <p className="mt-4 text-xl text-muted-foreground">
-            Backend & Systems Engineer
+          <p
+            className="mt-4 text-[10px] font-semibold tracking-[0.3em] text-white/30 uppercase"
+            style={{ fontFamily: 'var(--font-space-grotesk)' }}
+          >
+            Backend &amp; Systems Engineer
           </p>
-          <p className="mt-6 text-lg leading-relaxed text-foreground/90">
-            I build scalable systems, APIs, and infrastructure. Passionate about
-            voice AI, distributed systems, and clean architecture.
-          </p>
-        </section>
+        </motion.div>
 
-        {/* Projects teaser */}
-        <section className="mb-20">
-          <h2 className="text-2xl font-semibold text-foreground">Projects</h2>
-          <p className="mt-3 text-muted-foreground">
-            From real-time voice agents to high-throughput backends — I&apos;ve
-            worked across the stack. Curious about the details?
-          </p>
-        </section>
+        {/* RIGHT — Visualizer + CTA */}
+        {/* onAnimationComplete fires when exit finishes → navigate exactly then */}
+        <motion.div
+          className="flex flex-1 flex-col items-center justify-center gap-8"
+          initial={{ opacity: 0, scale: 0.91 }}
+          animate={isLeaving ? { opacity: 0, scale: 1.1 } : { opacity: 1, scale: 1 }}
+          transition={{
+            duration: isLeaving ? 0.65 : 0.9,
+            ease: 'easeOut',
+            delay: isLeaving ? 0 : 0.12,
+          }}
+          onAnimationComplete={() => {
+            if (isLeaving) router.push('/talk');
+          }}
+        >
+          <AgentAudioVisualizerAura
+            size="xl"
+            state="listening"
+            themeMode="dark"
+            colorShift={0.35}
+          />
 
-        {/* CTA */}
-        <section className="rounded-2xl border border-border bg-card p-8 text-card-foreground shadow-sm">
-          <h2 className="text-2xl font-semibold">
-            Want to know about me? Talk to Melvin
-          </h2>
-          <p className="mt-3 text-muted-foreground">
-            Have a conversation with Melvin — my AI voice assistant. Ask about
-            my work, projects, or book a call.
-          </p>
-          <Link
-            href="/talk"
-            className="mt-6 inline-flex h-12 items-center justify-center rounded-full bg-primary px-8 font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          <motion.button
+            onClick={handleTalkClick}
+            className="rounded-full px-9 py-3 text-sm font-semibold"
+            style={{
+              background: 'rgba(120,80,220,0.2)',
+              border: '1px solid rgba(120,80,220,0.5)',
+              color: 'rgba(200,170,255,0.95)',
+              fontFamily: 'var(--font-space-grotesk)',
+              letterSpacing: '0.06em',
+            }}
+            whileHover={{ background: 'rgba(120,80,220,0.32)', scale: 1.03 }}
+            whileTap={{ scale: 0.96 }}
+            transition={{ duration: 0.18 }}
           >
             Talk to Melvin
-          </Link>
-        </section>
-      </main>
+          </motion.button>
+        </motion.div>
+
+      </div>
     </div>
   );
 }
