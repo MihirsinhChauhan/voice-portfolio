@@ -187,7 +187,7 @@ function TalkContent() {
   const session = useSessionContext();
   const agent = useAgent();
   const { messages } = useSessionMessages();
-  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(true);
   const [showTranscript, setShowTranscript] = useState(false);
 
   // Single return with AnimatePresence so every state transition crossfades
@@ -249,7 +249,7 @@ function TalkContent() {
               isChatOpen={isChatOpen}
               onIsChatOpenChange={setIsChatOpen}
               onDisconnect={() => session.end()}
-              className="border-white/8 bg-white/5 backdrop-blur-sm"
+              className="border-white/8 bg-white/5 backdrop-blur-sm text-white/80"
             />
           </div>
 
