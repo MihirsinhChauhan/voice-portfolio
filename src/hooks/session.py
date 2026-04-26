@@ -2,8 +2,11 @@ import re
 
 from livekit import agents, rtc
 from livekit.agents import AgentSession, room_io
+from livekit.agents.types import APIConnectOptions
+from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit.plugins import groq, sarvam, cartesia, deepgram
 
 from src.agents.protfolio_agent import (
     BookingUserData,
@@ -40,10 +43,24 @@ def _custom_text_input_handler(
 
 async def portfolio_agent_handler(ctx: agents.JobContext):
     session = AgentSession(
-        stt="assemblyai/universal-streaming-multilingual",
-        llm="openai/gpt-4o-mini",
+        # stt="assemblyai/universal-streaming-multilingual",
+        # stt="deepgram/nova-3:multi",
+        # llm="openai/gpt-4.1-mini",
         # tts="cartesia/sonic-3:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
-        tts="inworld/inworld-tts-1.5-mini",
+        # tts="inworld/inworld-tts-1.5-mini",
+        stt=deepgram.STT(
+            model="nova-3",
+            language="en",
+        ),
+        llm=groq.LLM(
+            model="openai/gpt-oss-20b",
+        ),
+        tts=cartesia.TTS(
+        model="sonic-3",
+        voice="cc00e582-ed66-4004-8336-0175b85c85f6", # dana
+
+   ),
+        
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
         userdata=BookingUserData(),

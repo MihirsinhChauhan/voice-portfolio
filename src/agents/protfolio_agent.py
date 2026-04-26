@@ -1,12 +1,13 @@
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from livekit.agents import Agent, function_tool, llm, RunContext
 
-from src.agents.prompts import PORTFOLIO_ASSISTANT_INSTRUCTIONS
+from src.agents.prompts.v2 import PORTFOLIO_ASSISTANT_INSTRUCTIONS
 from src.agents.tools.cal_com_booking import _build_start_utc_iso
 from src.agents.tools.cal_com_booking import book_meeting as calcom_book_meeting
 from src.agents.tools.cal_com_booking import get_available_slots as calcom_get_available_slots
@@ -37,7 +38,50 @@ class IntentType:
 
 
 def _text(msg: llm.ChatMessage | None) -> str:
-    return ((msg.text_content or "") if msg else "").strip()
+    """User text from the message; falls back to audio transcript when strings are not yet materialized."""
+    if not msg:
+        return ""
+    direct = (msg.text_content or "").strip()
+    if direct:
+        return direct
+    parts: list[str] = []
+    for c in getattr(msg, "content", None) or []:
+        if isinstance(c, str) and c.strip():
+            parts.append(c.strip())
+            continue
+        tr = getattr(c, "transcript", None)
+        if isinstance(tr, str) and tr.strip():
+            parts.append(tr.strip())
+    s = " ".join(parts).strip()
+    if s:
+        return s
+    ex = getattr(msg, "extra", None)
+    if isinstance(ex, dict):
+        for k in ("transcript", "user_transcript", "text"):
+            v = ex.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return ""
+
+
+def _user_text_for_turn(turn_ctx: llm.ChatContext, new_message: llm.ChatMessage | None) -> str:
+    """Best-effort user line for routing; also reads context if the new message is not fully materialized."""
+    t = _normalize_stt_text(_text(new_message)) if new_message else ""
+    if t:
+        return t
+    for it in reversed(turn_ctx.items):
+        if getattr(it, "type", None) == "message" and getattr(it, "role", None) == "user":
+            t2 = _normalize_stt_text(_text(it))  # type: ignore[arg-type]
+            if t2:
+                return t2
+    return ""
+
+
+def _normalize_stt_text(s: str) -> str:
+    """STT and clients may use curly apostrophes; normalize for reliable keyword and phrase checks."""
+    if not s:
+        return s
+    return s.replace("\u2019", "'").replace("\u2018", "'").replace("\u201c", '"').replace("\u201d", '"')
 
 
 def _classify_intent(user_text: str) -> str:
@@ -77,8 +121,84 @@ def _is_depth_request(user_text: str) -> bool:
             "walk me through",
             "architecture",
             "design",
+            "why",
+            "approach",
+            "thinking",
+            "decision",
+            "tradeoff",
+            "trade-off",
         )
     )
+
+
+def _expresses_confusion(user_text: str) -> bool:
+    t = (user_text or "").lower()
+    return any(
+        k in t
+        for k in (
+            "don't understand",
+            "do not understand",
+            "confused",
+            "what are you saying",
+            "what do you mean",
+            "not sure what you",
+            "doesn't make sense",
+            "does not make sense",
+        )
+    )
+
+
+def _is_high_intent(user_text: str) -> bool:
+    """Signals interest or next-step fit — not the same as stating 'we are hiring' (use \\b for hire)."""
+    t = user_text.lower()
+    if re.search(r"\bhire\b", t):
+        return True
+    if any(
+        k in t
+        for k in (
+            "need someone",
+            "this is interesting",
+            "sounds like",
+            "sounds good",
+            "can he",
+            "would he",
+            "work together",
+        )
+    ):
+        return True
+    return bool(re.search(r"\bfit\b", t))
+
+
+def _is_short_filler_utterance(user_text: str) -> bool:
+    """Very short or backchannel phrasing: steer to RECOVERY instead of default VALUE."""
+    t = (user_text or "").strip()
+    if not t or len(t.split()) > 2:
+        return False
+    tl = t.lower()
+    if _wants_end(tl) or _wants_booking(tl) or _is_depth_request(tl) or _is_high_intent(tl):
+        return False
+    if _classify_intent_short(tl) is not None:
+        return False
+    return True
+
+
+def _classify_intent_short(t: str) -> str | None:
+    """Strong 1-2 word signals so hiring/founder can be detected without turn-count gating."""
+    if any(
+        k in t
+        for k in (
+            "hiring",
+            "hire",
+            "interview",
+            "recruit",
+            "recruiter",
+            "candidate",
+        )
+    ):
+        return IntentType.HIRING
+    if any(k in t for k in ("founder", "startup", "cofounder", "cto", "seed", "series")):
+        return IntentType.FOUNDER
+    return None
 
 
 def _wants_end(user_text: str) -> bool:
@@ -113,7 +233,8 @@ def _build_memory_context(userdata: "BookingUserData") -> str | None:
         hint = userdata.memory_hint.strip()
         if hint:
             return (
-                "Memory context (use lightly, with uncertainty hedges; never quote verbatim):\n"
+                "Memory context (use lightly, with uncertainty hedges; never quote verbatim). "
+                "Use this to shape tone and what you emphasize, not as a script.\n"
                 f"- {hint}"
             )
 
@@ -154,14 +275,39 @@ def _build_memory_context(userdata: "BookingUserData") -> str | None:
         return None
 
     return (
-        "Memory context (use lightly, with uncertainty hedges; never quote verbatim):\n"
+        "Memory context (use lightly, with uncertainty hedges; never quote verbatim). "
+        "Use this to shape tone and what you emphasize, not as a script.\n"
         + "\n".join(f"- {b}" for b in bits)
     )
 
 
-def _build_state_instruction(userdata: "BookingUserData") -> str:
+def _user_indicated_concrete_role_or_stack(user_text: str) -> bool:
+    """True when the user has likely said enough for a direct founder reply without clarifying Q."""
+    t = (user_text or "").lower()
+    if len(t.split()) < 4:
+        return False
+    return any(
+        k in t
+        for k in (
+            "backend",
+            "systems",
+            "engineer",
+            "infrastructure",
+            "infra",
+            "devops",
+            "sre",
+            "full stack",
+            "fullstack",
+            "staff",
+        )
+    )
+
+
+def _build_state_instruction(userdata: "BookingUserData", last_user_text: str = "") -> str:
     """Layer 2: per-turn instruction based on the current state."""
     base = (
+        "HIGHEST PRIORITY FOR THIS TURN: If anything below conflicts with the general system persona, "
+        "follow this block for this turn only.\n\n"
         "Voice output contract:\n"
         "- plain text only\n"
         "- 1 to 3 sentences by default\n"
@@ -178,16 +324,14 @@ def _build_state_instruction(userdata: "BookingUserData") -> str:
             return (
                 f"You are in state: {state}. Intent: {intent}.\n"
                 f"{base}\n"
-                "Goal: They are a founder evaluating an engineer to work with or hire. Mihir is not "
-                "a co-founder. Your first 1-2 sentences MUST describe Mihir's experience as an "
-                "engineer and how he could fit (e.g. ownership, backend, shipping). "
-                "If they have already specified what role/responsibilities they're looking for "
-                "(e.g. 'engineer for backend', 'help with systems'), respond directly to that match "
-                "without asking any questions. Only ask 'what they're building' or 'what problem "
-                "they're solving' if they have NOT specified what role/responsibilities they need. "
+                "Goal: They are a founder evaluating an engineer. Mihir is not a co-founder. "
+                "Respond directly to what they are looking for or building first, then briefly "
+                "connect Mihir's experience to that context. Do not force a generic introduction "
+                "before addressing their need. Only ask what they're building or what problem "
+                "they're solving if they have not yet indicated a role, stack, or problem area. "
                 "CRITICAL: Do NOT ask for their name, email, or contact information. Do NOT call "
                 "set_name, set_email, or any booking tools. Do NOT offer to schedule a call yet. "
-                "Focus ONLY on describing Mihir's experience and fit."
+                "Stay focused on fit and substance."
             )
         return (
             f"You are in state: {state}. Intent guess: {intent}.\n"
@@ -196,10 +340,32 @@ def _build_state_instruction(userdata: "BookingUserData") -> str:
         )
 
     if state == ConversationState.VALUE_EXCHANGE:
+        if intent == IntentType.FOUNDER:
+            if _user_indicated_concrete_role_or_stack(last_user_text):
+                return (
+                    f"You are in state: {state}. Intent: {intent}.\n"
+                    f"{base}\n"
+                    "NON-NEGOTIABLE: You are Melvin. For Mihir's work use third person only (Mihir has, he builds) — never "
+                    "'I have built' or 'I've worked' for his career; those imply you are Mihir. Do not end with a question. In two to three very short "
+                    "sentences: acknowledge what they need or are building, then name how Mihir fits (backend/ "
+                    "systems, Go or Python, ownership, shipping). No generic filler. "
+                    "CRITICAL: No name, email, contact, or booking tools. No scheduling offer unless they "
+                    "explicitly asked to book or meet."
+                )
+            return (
+                f"You are in state: {state}. Intent: {intent}.\n"
+                f"{base}\n"
+                "NON-NEGOTIABLE: The first sentence MUST begin with the word 'Mihir' and state plainly that he is "
+                "a hands-on engineer (backend/systems) or how he works; then you may add one specific question about "
+                "what they are building or what 'technical help' means. Do not use 'I'd love' or a mirror-only opener. "
+                "CRITICAL: No name, email, contact, or booking tools. No meeting offer unless they ask."
+            )
         return (
             f"You are in state: {state}. Intent: {intent}.\n"
             f"{base}\n"
-            "Goal for this turn: answer concisely, give just enough context, then offer one optional next step."
+            "Goal for this turn: answer what was asked directly and concisely. "
+            "Do NOT end with a question. Do NOT ask 'what else would you like to know?' or similar. "
+            "Let the user steer. Respond, then wait."
         )
 
     if state == ConversationState.OPTIONAL_DEPTH:
@@ -213,10 +379,13 @@ def _build_state_instruction(userdata: "BookingUserData") -> str:
         return (
             f"You are in state: {state}. Intent: {intent}.\n"
             f"{base}\n"
-            "Goal for this turn: gently offer a short call as an option, once, without pressure. "
-            "Do not call set_name, set_email, or any tools. Do not ask for name, email, or any "
-            "contact details. Your entire message must be only the offer. "
-            "Example: 'If helpful, we could set up a short call with Mihir to explore fit.'"
+            "This state OVERRIDES any generic instruction to collect name and email. You are NOT in the "
+            "booking collection step. FORBIDDEN in this state: any tool calls (set_name, set_email, "
+            "get_available_slots, book_meeting, get_current_datetime). If they want to book formally, they should say book or schedule. "
+            "Goal: mention a short call with Mihir as a possible next step, once, in a light way. "
+            "Spoken only — do not collect PII, do not call any tools, do not ask for contact details, "
+            "do not use phrasing that leads to name or email. "
+            "Example: 'If you want to go deeper, a short call with Mihir is an option — just say the word.'"
         )
 
     if state == ConversationState.BOOKING_COLLECT_NAME_AND_EMAIL:
@@ -227,9 +396,9 @@ def _build_state_instruction(userdata: "BookingUserData") -> str:
             "CRITICAL: Do NOT infer, guess, or make up names or emails. Only call set_name and set_email "
             "if the user's message explicitly contains both their full name AND email address. "
             "If the user has NOT provided both name and email in this message, do not call ANY tools; "
-            "only reply with one message asking them to type their full name and email together "
-            "(e.g. 'Please type your full name and email so we can set up the call.' or "
-            "'To get started, please share your full name and email address.'). "
+            "reply once and explain that names and addresses are hard to get right by voice alone, so they "
+            "should TYPE their full name and email in the text or chat field (not only say them out loud). "
+            "Ask them to put both on one or two lines so nothing is garbled. "
             "You must collect name and email BEFORE showing available slots. "
             "Always ask for BOTH name and email together in a single request."
         )
@@ -262,22 +431,28 @@ def _build_state_instruction(userdata: "BookingUserData") -> str:
         return (
             f"You are in state: {state}.\n"
             f"{base}\n"
-            "Goal for this turn: close warmly and lightly. Do not push booking."
+            "Goal for this turn: a clear closing — thank them, wish them well, or say a short line like you’re glad "
+            "they stopped by. Add a light closing line (e.g. take care, all the best, looking forward to the call if "
+            "relevant). Do not start new topics or push booking. Keep it 1-3 short sentences, calm and human."
         )
 
     if state == ConversationState.RECOVERY:
         return (
             f"You are in state: {state}.\n"
             f"{base}\n"
-            "Goal for this turn: acknowledge any confusion or silence, restate the gist in simpler terms, "
-            "and offer one clear next option."
+            "NON-NEGOTIABLE: The first four words of your reply MUST be exactly: 'Sorry if that was confusing' "
+            "unless the user turn was empty or silent, in which case start with: 'I'm still here' then continue. "
+            "After that, one plain sentence: Mihir is a hands-on backend and systems engineer, and you help explain his work. "
+            "End with one concrete next option the listener can take — a topic, project, or kind of role fit. "
+            "Do not skip the required opener above."
         )
 
     if state == ConversationState.END:
         return (
             f"You are in state: {state}.\n"
             f"{base}\n"
-            "Goal for this turn: keep it to a short, warm sign-off. Do not introduce new topics."
+            "Goal for this turn: a final goodbye — short, warm, and conclusive. Thank them, say goodbye, or wish them a "
+            "good day. Do not introduce new topics, questions, or booking. One to three brief sentences is enough."
         )
 
     return (
@@ -307,6 +482,7 @@ class BookingUserData:
     state: str = ConversationState.GREETING
     intent_type: str = IntentType.UNKNOWN
     booking_offer_count: int = 0
+    turn_count: int = 0
     # Phase 3 hook point for Phase 1 memory. Keep this soft & optional.
     memory_hint: str | None = None
     # Populated on successful booking for DB persistence.
@@ -335,19 +511,28 @@ class PortfolioAssistant(Agent):
     ) -> None:
         # Phase 3: lightweight routing to update state/intent, then inject Layer 2 + Layer 3.
         ud: BookingUserData = self.session.userdata  # type: ignore[assignment]
-        user_text = _text(new_message)
+        user_text = _user_text_for_turn(turn_ctx, new_message)
 
         if user_text and _wants_end(user_text):
             ud.state = ConversationState.END
             self._end_requested = True
 
-        # Very short backchannels ("yes", "ok") should not thrash state/intent.
-        if user_text and len(user_text.split()) >= 3:
-            ud.intent_type = _classify_intent(user_text)
+        ud.turn_count += 1
+
+        if user_text:
+            words = user_text.split()
+            if len(words) >= 3:
+                ud.intent_type = _classify_intent(user_text)
+            else:
+                short = _classify_intent_short(user_text.lower())
+                if short is not None:
+                    ud.intent_type = short
 
         # Do not change state once we've reached END.
         if ud.state == ConversationState.END:
-            turn_ctx.add_message(role="developer", content=_build_state_instruction(ud))
+            turn_ctx.add_message(
+                role="developer", content=_build_state_instruction(ud, user_text)
+            )
             mem = _build_memory_context(ud)
             if mem:
                 turn_ctx.add_message(role="developer", content=mem)
@@ -377,39 +562,40 @@ class PortfolioAssistant(Agent):
             else:
                 if not user_text:
                     ud.state = ConversationState.RECOVERY
+                elif _expresses_confusion(user_text):
+                    ud.state = ConversationState.RECOVERY
                 elif _is_depth_request(user_text):
                     ud.state = ConversationState.OPTIONAL_DEPTH
+                elif _is_short_filler_utterance(user_text):
+                    ud.state = ConversationState.RECOVERY
+                elif user_text and ud.intent_type == IntentType.HIRING:
+                    ud.state = ConversationState.VALUE_EXCHANGE
                 elif ud.state in (
                     ConversationState.GREETING,
                     ConversationState.DISCOVER_INTENT,
-                ):
+                ) and ud.turn_count <= 1:
                     ud.state = ConversationState.DISCOVER_INTENT
                 else:
                     ud.state = ConversationState.VALUE_EXCHANGE
 
-                # Soft CTA gating: keep it conservative but with broader signals.
-                # Do NOT trigger soft CTA for FOUNDER intent in DISCOVER_INTENT state
-                soft_cta_triggers = (
-                    "help",
-                    "work together",
-                    "collaborate",
-                    "fit",
-                    "hire",
-                    "bring him in",
-                    "interesting",
-                    "relevant",
-                    "sounds good",
-                    "makes sense",
-                )
-                if (user_text and ud.booking_offer_count < 1 
-                    and ud.state != ConversationState.DISCOVER_INTENT 
+                # Soft CTA: when the user shows clear interest or alignment, once — not time-based.
+                if (
+                    user_text
+                    and _is_high_intent(user_text)
+                    and ud.booking_offer_count < 1
                     and ud.intent_type != IntentType.FOUNDER
-                    and any(k in user_text.lower() for k in soft_cta_triggers)):
+                    and ud.state
+                    in (
+                        ConversationState.DISCOVER_INTENT,
+                        ConversationState.VALUE_EXCHANGE,
+                        ConversationState.OPTIONAL_DEPTH,
+                    )
+                ):
                     ud.state = ConversationState.SOFT_CTA
                     ud.booking_offer_count += 1
 
         # Layer 2: state instruction (developer message, ephemeral for this turn)
-        turn_ctx.add_message(role="developer", content=_build_state_instruction(ud))
+        turn_ctx.add_message(role="developer", content=_build_state_instruction(ud, user_text))
 
         # Layer 3: memory context (developer message, ephemeral)
         mem = _build_memory_context(ud)
@@ -448,12 +634,12 @@ class PortfolioAssistant(Agent):
 
     @function_tool(
         name="set_name",
-        description="Call this ONLY when the user has explicitly provided their full name in their message. Do NOT infer or guess names. Store it for the booking.",
+        description="Call this ONLY when the user has explicitly provided their full name in their text or message (ideally typed). Do NOT infer or guess names. Store it for the booking.",
     )
     async def set_name(self, context: RunContext[BookingUserData], value: str) -> str:
-        """Store the user's name for the current session. Call ONLY when the user explicitly says their name.
+        """Store the user's name. Call ONLY when the user gave their full name in what they wrote or said—prefer typed text for accuracy.
         Args:
-            value: The full name the user explicitly provided. Do NOT infer or make up names.
+            value: The full name the user provided. Do NOT infer or make up names.
         """
         context.userdata.name = value.strip()
         result = f"Got it, I have your name as {context.userdata.name}."
@@ -462,12 +648,12 @@ class PortfolioAssistant(Agent):
 
     @function_tool(
         name="set_email",
-        description="Call this ONLY when the user has explicitly provided their email address in their message. Do NOT infer or guess emails. Store it for the booking.",
+        description="Call this ONLY when the user has explicitly provided their email in their text or message (ideally typed). Do NOT infer or guess emails. Store it for the booking.",
     )
     async def set_email(self, context: RunContext[BookingUserData], value: str) -> str:
-        """Store the user's email for the current session. Call ONLY when the user explicitly says their email.
+        """Store the user's email. Call ONLY when the user gave their email in what they wrote or said—prefer typed text.
         Args:
-            value: The email address the user explicitly provided. Do NOT infer or make up emails.
+            value: The email the user provided. Do NOT infer or make up emails.
         """
         context.userdata.email = value.strip()
         if context.userdata.state == ConversationState.BOOKING_COLLECT_NAME_AND_EMAIL:

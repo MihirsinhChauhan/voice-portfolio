@@ -4,7 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     # Core LiveKit Agents with audio extras; include LLM extras needed for tests
-    "livekit-agents[openai,google,groq,silero,turn-detector]~=1.3",
+    "livekit-agents[cartesia,deepgram,google,groq,openai,sarvam,silero,smallestai,turn-detector]~=1.4",
     "livekit-plugins-noise-cancellation~=0.2",
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.1",
