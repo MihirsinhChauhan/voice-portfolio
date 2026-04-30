@@ -198,7 +198,7 @@ function TalkContent() {
       )}
 
       {agent.isFinished && (
-        <FinishedState key="finished" failureReasons={agent.failureReasons} />
+        <FinishedState key="finished" failureReasons={agent.failureReasons ?? undefined} />
       )}
 
       {!agent.isPending && !agent.isFinished && (
