@@ -10,3 +10,12 @@ __pycache__
 *.pywz
 *.pyzw
 *.pyzwz
+
+.claude
+.cursor
+.pytest_cache
+.ruff_cache
+.vscode
+.DS_Store
+
+implementations/

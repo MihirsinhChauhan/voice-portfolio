@@ -17,14 +17,19 @@ const LIVEKIT_URL = process.env.LIVEKIT_URL;
 // don't cache the results
 export const revalidate = 0;
 
-export async function POST(req: Request) {
-  if (process.env.NODE_ENV !== 'development') {
+function assertTokenRouteAllowed(): void {
+  const dev = process.env.NODE_ENV === 'development';
+  const optedIn = process.env.LIVEKIT_ALLOW_INSECURE_TOKEN_ROUTE === 'true';
+  if (!dev && !optedIn) {
     throw new Error(
-      'THIS API ROUTE IS INSECURE. DO NOT USE THIS ROUTE IN PRODUCTION WITHOUT AN AUTHENTICATION LAYER.',
+      'Token API disabled in production. Set LIVEKIT_ALLOW_INSECURE_TOKEN_ROUTE=true on Vercel only if you accept an unauthenticated token endpoint; prefer adding auth instead.',
     );
   }
+}
 
+export async function POST(req: Request) {
   try {
+    assertTokenRouteAllowed();
     if (LIVEKIT_URL === undefined) {
       throw new Error('LIVEKIT_URL is not defined');
     }
